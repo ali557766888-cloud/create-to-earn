@@ -1,0 +1,507 @@
+import React, { useEffect, useState, useRef } from "react";
+
+// CreateToEarn.jsx
+// Single-file React component. Default export a React app component.
+// Persist everything to localStorage so the demo feels realistic.
+
+const STORAGE_KEYS = {
+  USERS: "cte_users_v1",
+  POSTS: "cte_posts_v1",
+};
+
+function uid(prefix = "id") {
+  return `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function readStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function writeStorage(key, val) {
+  localStorage.setItem(key, JSON.stringify(val));
+}
+
+function seedIfEmpty() {
+  const users = readStorage(STORAGE_KEYS.USERS, []);
+  if (users.length === 0) {
+    const demo = {
+      id: uid("user"),
+      username: "demo",
+      password: "demo",
+      balance: 5.0,
+      minerBalance: 0.0,
+      posts: 0,
+      referralCode: "REF_DEMO",
+      referred: [],
+    };
+    writeStorage(STORAGE_KEYS.USERS, [demo]);
+  }
+}
+
+export default function CreateToEarnApp() {
+  seedIfEmpty();
+
+  const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState(() => readStorage(STORAGE_KEYS.USERS, []));
+  const [posts, setPosts] = useState(() => readStorage(STORAGE_KEYS.POSTS, []));
+  const [currentUserId, setCurrentUserId] = useState(() => localStorage.getItem("cte_current_user") || null);
+  const [page, setPage] = useState("home");
+
+  // login/register form
+  const [formU, setFormU] = useState("");
+  const [formP, setFormP] = useState("");
+  const [formReferral, setFormReferral] = useState("");
+  const [message, setMessage] = useState("");
+
+  // create post
+  const [postTitle, setPostTitle] = useState("");
+  const [postDesc, setPostDesc] = useState("");
+  const [filePreview, setFilePreview] = useState(null);
+  const fileRef = useRef();
+
+  // mining
+  const [mining, setMining] = useState(false);
+  const miningTimer = useRef(null);
+  const [miningProgress, setMiningProgress] = useState(0);
+
+  useEffect(() => {
+    // 5 second loading animation
+    const t = setTimeout(() => setLoading(false), 5000);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => writeStorage(STORAGE_KEYS.USERS, users), [users]);
+  useEffect(() => writeStorage(STORAGE_KEYS.POSTS, posts), [posts]);
+  useEffect(() => {
+    if (currentUserId) localStorage.setItem("cte_current_user", currentUserId);
+    else localStorage.removeItem("cte_current_user");
+  }, [currentUserId]);
+
+  const currentUser = users.find((u) => u.id === currentUserId) || null;
+
+  function register() {
+    if (!formU || !formP) return setMessage("username and password required");
+    if (users.some((u) => u.username === formU)) return setMessage("username taken");
+
+    // referral handling
+    let creditedReferrerId = null;
+    if (formReferral) {
+      const ref = users.find((uu) => uu.referralCode === formReferral);
+      if (ref) {
+        // give $1 instant to referrer
+        ref.balance = parseFloat((ref.balance + 1).toFixed(2));
+        creditedReferrerId = ref.id;
+      }
+    }
+
+    const code = `REF_${formU.toUpperCase()}_${Math.random().toString(36).slice(2,5)}`;
+    const u = {
+      id: uid("user"),
+      username: formU,
+      password: formP,
+      balance: 0.0,
+      minerBalance: 0.0,
+      posts: 0,
+      referralCode: code,
+      referred: [],
+    };
+    const newUsers = [...users];
+    newUsers.push(u);
+
+    if (creditedReferrerId) {
+      const r = newUsers.find((x) => x.id === creditedReferrerId);
+      r.referred.push(u.username);
+    }
+
+    setUsers(newUsers);
+    setMessage("registered! you can now login");
+    setFormU("");
+    setFormP("");
+    setFormReferral("");
+  }
+
+  function login() {
+    const u = users.find((x) => x.username === formU && x.password === formP);
+    if (!u) return setMessage("invalid credentials");
+    setCurrentUserId(u.id);
+    setMessage("");
+    setPage("home");
+    setFormU("");
+    setFormP("");
+  }
+
+  function logout() {
+    setCurrentUserId(null);
+    setPage("home");
+  }
+
+  function handleFile(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setFilePreview(ev.target.result);
+    reader.readAsDataURL(f);
+  }
+
+  function createPost() {
+    if (!currentUser) return setMessage("login first");
+    if (!postTitle && !filePreview && !postDesc) return setMessage("add some content");
+
+    const p = {
+      id: uid("post"),
+      ownerId: currentUser.id,
+      ownerName: currentUser.username,
+      title: postTitle,
+      desc: postDesc,
+      file: filePreview,
+      ts: Date.now(),
+    };
+    const newPosts = [p, ...posts];
+    setPosts(newPosts);
+
+    // add $0.1 per post
+    const uIndex = users.findIndex((x) => x.id === currentUser.id);
+    if (uIndex !== -1) {
+      const newUsers = [...users];
+      newUsers[uIndex] = { ...newUsers[uIndex] };
+      newUsers[uIndex].balance = parseFloat((newUsers[uIndex].balance + 0.1).toFixed(2));
+      newUsers[uIndex].posts += 1;
+      setUsers(newUsers);
+      // refresh current user by forcing re-render
+      setCurrentUserId(newUsers[uIndex].id);
+    }
+
+    // reset create form
+    setPostTitle("");
+    setPostDesc("");
+    setFilePreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+    setMessage("posted! +$0.10 added to your balance");
+    setPage("home");
+  }
+
+  function startMining() {
+    if (!currentUser) return setMessage("login to mine");
+    if (mining) return;
+    setMining(true);
+    setMiningProgress(0);
+    let progress = 0;
+    miningTimer.current = setInterval(() => {
+      progress += Math.random() * 12 + 6; // random progress increments
+      if (progress >= 100) {
+        clearInterval(miningTimer.current);
+        setMining(false);
+        setMiningProgress(100);
+        // reward minerBalance 0.05
+        const idx = users.findIndex((u) => u.id === currentUser.id);
+        if (idx !== -1) {
+          const nu = [...users];
+          nu[idx] = { ...nu[idx] };
+          nu[idx].minerBalance = parseFloat((nu[idx].minerBalance + 0.05).toFixed(4));
+          setUsers(nu);
+          setCurrentUserId(nu[idx].id);
+        }
+        setTimeout(() => setMiningProgress(0), 800);
+      } else {
+        setMiningProgress(Math.min(100, Math.round(progress)));
+      }
+    }, 400);
+  }
+
+  function claimMining() {
+    if (!currentUser) return setMessage("login to claim");
+    const idx = users.findIndex((u) => u.id === currentUser.id);
+    if (idx === -1) return;
+    const nu = [...users];
+    const claim = nu[idx].minerBalance || 0;
+    if (claim <= 0) return setMessage("nothing to claim");
+    nu[idx].balance = parseFloat((nu[idx].balance + claim).toFixed(4));
+    nu[idx].minerBalance = 0;
+    setUsers(nu);
+    setCurrentUserId(nu[idx].id);
+    setMessage(`claimed $${claim.toFixed(4)} to main balance`);
+  }
+
+  function requestPayout() {
+    if (!currentUser) return setMessage("login to payout");
+    if (currentUser.balance < 20) return setMessage("minimum payout is $20");
+    // simulate payout
+    const idx = users.findIndex((u) => u.id === currentUser.id);
+    const nu = [...users];
+    const amt = nu[idx].balance;
+    nu[idx].balance = 0;
+    setUsers(nu);
+    setCurrentUserId(nu[idx].id);
+    setMessage(`payout requested for $${amt.toFixed(2)} — (demo mode)`);
+  }
+
+  function sendPayment(toUsername, amount) {
+    if (!currentUser) return setMessage("login to pay");
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) return setMessage("invalid amount");
+    if (currentUser.balance < amt) return setMessage("insufficient funds");
+    const toIdx = users.findIndex((u) => u.username === toUsername);
+    if (toIdx === -1) return setMessage("recipient not found");
+    const idx = users.findIndex((u) => u.id === currentUser.id);
+    const nu = [...users];
+    nu[idx] = { ...nu[idx], balance: parseFloat((nu[idx].balance - amt).toFixed(4)) };
+    nu[toIdx] = { ...nu[toIdx], balance: parseFloat((nu[toIdx].balance + amt).toFixed(4)) };
+    setUsers(nu);
+    setCurrentUserId(nu[idx].id);
+    setMessage(`sent $${amt.toFixed(2)} to ${toUsername}`);
+  }
+
+  // small UI pieces
+  function Sidebar() {
+    const items = [
+      { id: "home", label: "Home" },
+      { id: "create", label: "Create" },
+      { id: "buy", label: "Buy & Sell" },
+      { id: "earn", label: "Earn" },
+      { id: "mine", label: "Mine" },
+      { id: "pay", label: "Pay" },
+      { id: "ref", label: "Referral" },
+    ];
+    return (
+      <div className="w-56 bg-white/90 backdrop-blur p-4 rounded-r-2xl h-full shadow-md">
+        <h3 className="text-xl font-bold mb-4">Create to Earn</h3>
+        <nav className="flex flex-col gap-2">
+          {items.map((it) => (
+            <button
+              key={it.id}
+              className={`text-left p-2 rounded hover:bg-gray-100 ${page === it.id ? 'bg-gray-100 font-semibold' : ''}`}
+              onClick={() => setPage(it.id)}
+            >
+              {it.label}
+            </button>
+          ))}
+        </nav>
+        <div className="mt-6 text-sm">
+          {currentUser ? (
+            <>
+              <div>Hi, <b>{currentUser.username}</b></div>
+              <div>Balance: ${currentUser.balance.toFixed(4)}</div>
+              <div>Miner: ${currentUser.minerBalance.toFixed(4)}</div>
+              <button onClick={logout} className="mt-3 px-3 py-1 rounded bg-red-500 text-white">Logout</button>
+            </>
+          ) : (
+            <div className="text-gray-500">Not signed in</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Pages
+  function HomePage() {
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Home</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-4 bg-white rounded shadow">
+            <h3 className="font-semibold">Latest Posts</h3>
+            <div className="mt-3 space-y-3 max-h-96 overflow-auto">
+              {posts.length === 0 && <div className="text-gray-500">No posts yet.</div>}
+              {posts.map((p) => (
+                <div key={p.id} className="border p-2 rounded">
+                  <div className="flex items-center justify-between">
+                    <strong>{p.ownerName}</strong>
+                    <span className="text-xs text-gray-500">{new Date(p.ts).toLocaleString()}</span>
+                  </div>
+                  {p.title && <div className="mt-1 font-semibold">{p.title}</div>}
+                  {p.desc && <div className="mt-1 text-sm">{p.desc}</div>}
+                  {p.file && <img src={p.file} alt="upload" className="mt-2 max-h-48 object-contain" />}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="p-4 bg-white rounded shadow">
+            <h3 className="font-semibold">Quick Actions</h3>
+            <div className="mt-3 space-y-2">
+              <button onClick={() => setPage('create')} className="px-3 py-2 rounded bg-blue-600 text-white">Create</button>
+              <button onClick={() => setPage('mine')} className="px-3 py-2 rounded bg-yellow-500 text-black">Mine</button>
+              <button onClick={() => setPage('earn')} className="px-3 py-2 rounded bg-green-600 text-white">Earnings</button>
+            </div>
+            <div className="mt-4 text-sm text-gray-600">Tip: each post gives you $0.10 instantly.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function CreatePage() {
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Create</h2>
+        <div className="p-4 bg-white rounded shadow max-w-2xl">
+          <input className="w-full p-2 border rounded mb-2" placeholder="Title" value={postTitle} onChange={(e) => setPostTitle(e.target.value)} />
+          <textarea className="w-full p-2 border rounded mb-2" placeholder="Description" value={postDesc} onChange={(e) => setPostDesc(e.target.value)} />
+          <input ref={fileRef} type="file" onChange={handleFile} className="mb-2" />
+          {filePreview && <img src={filePreview} className="max-h-64 mb-2" alt="preview" />}
+          <div className="flex gap-2">
+            <button onClick={createPost} className="px-3 py-2 rounded bg-blue-600 text-white">Post & Earn $0.10</button>
+            <button onClick={() => { setPostTitle(''); setPostDesc(''); setFilePreview(null); if (fileRef.current) fileRef.current.value = ''; }} className="px-3 py-2 rounded bg-gray-200">Clear</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function EarnPage() {
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Earn / Payout</h2>
+        <div className="p-4 bg-white rounded shadow max-w-md">
+          <div>Available balance: <b>${currentUser ? currentUser.balance.toFixed(4) : '0.0000'}</b></div>
+          <div>Miner balance (unclaimed): <b>${currentUser ? currentUser.minerBalance.toFixed(4) : '0.0000'}</b></div>
+          <div className="mt-3 flex gap-2">
+            <button onClick={requestPayout} className="px-3 py-2 rounded bg-green-600 text-white">Request Payout ($20 min)</button>
+            <button onClick={claimMining} className="px-3 py-2 rounded bg-indigo-600 text-white">Claim Mining</button>
+          </div>
+          <div className="text-sm text-gray-600 mt-3">Payouts are simulated in demo. Minimum payout is $20 to prevent spam.</div>
+        </div>
+      </div>
+    );
+  }
+
+  function MinePage() {
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Mine</h2>
+        <div className="p-4 bg-white rounded shadow max-w-md">
+          <div className="mb-3">Mining sim: press start to simulate work. Full runs add a small miner balance.</div>
+          <div className="w-full bg-gray-200 rounded h-4 overflow-hidden mb-3">
+            <div style={{ width: `${miningProgress}%` }} className="h-full bg-gradient-to-r from-yellow-400 to-yellow-600" />
+          </div>
+          <div className="flex gap-2">
+            <button onClick={startMining} className="px-3 py-2 rounded bg-yellow-500">Start Mining</button>
+            <button onClick={claimMining} className="px-3 py-2 rounded bg-indigo-600 text-white">Claim</button>
+          </div>
+          <div className="mt-2 text-sm text-gray-600">Each complete run gives ~0.05 to miner balance; claim to move to main balance.</div>
+        </div>
+      </div>
+    );
+  }
+
+  function BuySellPage() {
+    const [amt, setAmt] = useState(1);
+    function buy() {
+      if (!currentUser) return setMessage('login to buy');
+      if (amt <= 0) return setMessage('invalid amount');
+      const idx = users.findIndex(u => u.id === currentUser.id);
+      const nu = [...users];
+      nu[idx] = { ...nu[idx], balance: parseFloat((nu[idx].balance + parseFloat(amt)).toFixed(4)) };
+      setUsers(nu);
+      setCurrentUserId(nu[idx].id);
+      setMessage(`bought $${amt} credit (demo)`);
+    }
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Buy & Sell</h2>
+        <div className="p-4 bg-white rounded shadow max-w-md">
+          <div className="mb-2">Add funds to your account (demo payments)</div>
+          <input type="number" step="0.01" value={amt} onChange={e => setAmt(parseFloat(e.target.value)||0)} className="p-2 border rounded w-40 mb-2" />
+          <div className="flex gap-2">
+            <button onClick={buy} className="px-3 py-2 rounded bg-blue-600 text-white">Buy Credits</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function PayPage() {
+    const [to, setTo] = useState("");
+    const [amt, setAmt] = useState(0);
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Pay</h2>
+        <div className="p-4 bg-white rounded shadow max-w-md">
+          <input className="w-full p-2 border rounded mb-2" placeholder="recipient username" value={to} onChange={e => setTo(e.target.value)} />
+          <input type="number" step="0.01" className="w-full p-2 border rounded mb-2" placeholder="amount" value={amt} onChange={e => setAmt(parseFloat(e.target.value)||0)} />
+          <div className="flex gap-2">
+            <button onClick={() => sendPayment(to, amt)} className="px-3 py-2 rounded bg-green-600 text-white">Send</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function ReferralPage() {
+    return (
+      <div>
+        <h2 className="text-2xl font-bold mb-4">Referral</h2>
+        <div className="p-4 bg-white rounded shadow max-w-md">
+          {currentUser ? (
+            <>
+              <div>Your referral code:</div>
+              <div className="mt-2 p-2 bg-gray-100 rounded font-mono">{currentUser.referralCode}</div>
+              <div className="mt-3">Share this code — when new users register with it, you get $1 instantly (demo).</div>
+              <div className="mt-3">Referred users:</div>
+              <ul className="mt-2 list-disc ml-5">
+                {(currentUser.referred && currentUser.referred.length > 0) ? currentUser.referred.map((r, i) => <li key={i}>{r}</li>) : <li className="text-gray-500">No referrals yet</li>}
+              </ul>
+            </>
+          ) : (
+            <div className="text-gray-500">Login to see your referral info</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-sky-50 to-white p-6">
+      {loading ? (
+        <div className="w-full h-screen flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-20 h-20 rounded-full bg-gradient-to-r from-indigo-400 to-fuchsia-500 animate-bounce" />
+            <div>Loading Create to Earn...</div>
+          </div>
+        </div>
+      ) : (
+        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-[280px,1fr] gap-6">
+          <Sidebar />
+
+          <main>
+            <header className="flex items-center justify-between mb-6">
+              <h1 className="text-3xl font-bold">{page.charAt(0).toUpperCase() + page.slice(1)}</h1>
+              <div className="flex items-center gap-3">
+                {!currentUser ? (
+                  <div className="flex gap-2 items-center">
+                    <input placeholder="username" value={formU} onChange={e => setFormU(e.target.value)} className="p-2 border rounded" />
+                    <input placeholder="password" value={formP} onChange={e => setFormP(e.target.value)} type="password" className="p-2 border rounded" />
+                    <button onClick={login} className="px-3 py-2 rounded bg-blue-600 text-white">Login</button>
+                    <button onClick={register} className="px-3 py-2 rounded bg-gray-200">Register</button>
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-600">Welcome back, <b>{currentUser.username}</b></div>
+                )}
+              </div>
+            </header>
+
+            <section>
+              {message && <div className="mb-4 p-2 bg-yellow-100 rounded">{message}</div>}
+
+              {page === 'home' && <HomePage />}
+              {page === 'create' && <CreatePage />}
+              {page === 'earn' && <EarnPage />}
+              {page === 'mine' && <MinePage />}
+              {page === 'buy' && <BuySellPage />}
+              {page === 'pay' && <PayPage />}
+              {page === 'ref' && <ReferralPage />}
+            </section>
+
+            <footer className="mt-6 text-xs text-gray-500">Demo app — payments & payouts are simulated. Data stored locally in your browser.</footer>
+
+          </main>
+        </div>
+      )}
+    </div>
+  );
+}
